@@ -102,7 +102,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     )
                 ),
                 io.Combo.Input("attention_mode",
-                    options=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
+                    options=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_1", "sageattn_2", "sageattn_3"],
                     default="sdpa",
                     optional=True,
                     tooltip=(
@@ -110,6 +110,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "• sdpa: PyTorch scaled_dot_product_attention (default, stable, always available)\n"
                         "• flash_attn_2: Flash Attention 2 (Ampere+, requires flash-attn package)\n"
                         "• flash_attn_3: Flash Attention 3 (Hopper+, requires flash-attn with FA3 support)\n"
+                        "• sageattn_1: SageAttention 1 (legacy, any CUDA GPU, requires sageattention==1.0.6)\n"
                         "• sageattn_2: SageAttention 2 (requires sageattention package)\n"
                         "• sageattn_3: SageAttention 3 (Blackwell/RTX 50xx only, requires sageattn3 package)\n"
                         "\n"
@@ -147,7 +148,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             cache_model: Whether to keep model loaded between runs
             blocks_to_swap: Number of transformer blocks to swap (requires offload_device != device)
             swap_io_components: Whether to offload I/O components (requires offload_device != device)
-            attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+            attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3')
             torch_compile_args: Optional torch.compile configuration from settings node
             
         Returns:

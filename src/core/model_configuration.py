@@ -171,7 +171,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention mode string ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3')
         
     Returns:
         Human-readable description string
@@ -183,6 +183,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
         'sdpa': 'PyTorch SDPA',
         'flash_attn_2': 'Flash Attention 2',
         'flash_attn_3': 'Flash Attention 3',
+        'sageattn_1': 'SageAttention 1',
         'sageattn_2': 'SageAttention 2',
         'sageattn_3': 'SageAttention 3 (Blackwell)'
     }
@@ -439,7 +440,7 @@ def _update_dit_config(
             - dynamic: bool - Enable dynamic shapes
             - dynamo_cache_size_limit: int - Cache size limit
             - dynamo_recompile_limit: int - Recompilation limit
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3')
         debug: Debug instance for logging
         
     Returns:
@@ -774,7 +775,7 @@ def configure_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -868,7 +869,7 @@ def _configure_runner_settings(
         decode_tile_size: Tile dimensions (height, width) for decoding in pixels
         decode_tile_overlap: Overlap dimensions (height, width) between decoding tiles
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: torch.compile configuration for DiT model or None
         torch_compile_args_vae: torch.compile configuration for VAE model or None
         block_swap_config: BlockSwap configuration for DiT model or None

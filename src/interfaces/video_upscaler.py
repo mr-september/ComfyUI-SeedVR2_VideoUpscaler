@@ -84,15 +84,16 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                         "Same seed with same inputs produces identical output."
                     )
                 ),
-                io.Int.Input("resolution",
-                    default=1080,
-                    min=16,
-                    max=16384,
-                    step=2,
+                io.Float.Input("scale_by",
+                    default=2.00,
+                    min=0.1,
+                    max=10.0,
+                    step=0.01,
                     tooltip=(
-                        "Target resolution for the shortest edge in pixels (default: 1080).\n"
-                        "Automatically maintains aspect ratio of input.\n"
-                        "Even values required for optimal processing."
+                        "Upscale multiplier relative to input dimensions (default: 2.00).\n"
+                        "Example: 2.00 = 2x upscale, 1.5 = 1.5x upscale.\n"
+                        "Actual output resolution = input_shortest_edge × scale_by,\n"
+                        "subject to max_resolution cap if specified."
                     )
                 ),
                 io.Int.Input("max_resolution",
@@ -102,7 +103,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                     step=2,
                     tooltip=(
                         "Maximum resolution limit for any dimension (default: 0, no limit).\n"
-                        "If any edge exceeds this after applying resolution,\n"
+                        "If any edge exceeds this after applying scale_by,\n"
                         "both dimensions are scaled down proportionally.\n"
                         "Useful to prevent excessive VRAM usage on extreme aspect ratios."
                     )
@@ -224,25 +225,25 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, image: torch.Tensor, dit: Dict[str, Any], vae: Dict[str, Any], 
-                seed: int, resolution: int = 1080, max_resolution: int = 0, batch_size: int = 5,
+    def execute(cls, image: torch.Tensor, dit: Dict[str, Any], vae: Dict[str, Any],
+                seed: int, scale_by: float = 2.00, max_resolution: int = 0, batch_size: int = 5,
                 uniform_batch_size: bool = False, temporal_overlap: int = 0, prepend_frames: int = 0,
                 color_correction: str = "wavelet", input_noise_scale: float = 0.0,
-                latent_noise_scale: float = 0.0, offload_device: str = "none", 
+                latent_noise_scale: float = 0.0, offload_device: str = "none",
                 enable_debug: bool = False) -> io.NodeOutput:
         """
         Execute SeedVR2 video upscaling with progress reporting
-        
+
         Main entry point for ComfyUI node execution.
         Automatically detects and preserves input format (RGB or RGBA). Handles model downloads,
         configuration unpacking, and delegates to upscaling pipeline.
-        
+
         Args:
             image: Input video frames as tensor (N, H, W, C) in [0, 1] range
             dit: DiT model configuration from SeedVR2LoadDiTModel node
             vae: VAE model configuration from SeedVR2LoadVAEModel node
             seed: Random seed for reproducible generation
-            resolution: Target resolution for shortest edge (maintains aspect ratio)
+            scale_by: Upscale multiplier (e.g., 2.00 = 2x, 1.5 = 1.5x)
             max_resolution: Maximum resolution for any edge (0 = no limit)
             batch_size: Frames per batch (minimum 5 for temporal consistency)
             uniform_batch_size: Whether to pad final batch to match batch_size
@@ -253,16 +254,29 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             latent_noise_scale: Latent noise injection scale [0.0-1.0]
             offload_device: Device to offload intermediate tensors
             enable_debug: Enable detailed logging and memory tracking
-            
+
         Returns:
             NodeOutput containing upscaled video tensor (N, H', W', C) in [0, 1] range
-            
+
         Raises:
             ValueError: If model files cannot be downloaded or configuration is invalid
             RuntimeError: If generation fails
         """
         # Initialize debug (stateless - stored in local variable)
         debug = Debug(enabled=enable_debug)
+
+        # Compute target resolution from scale_by and input dimensions
+        # Input image shape: [T, H, W, C]
+        input_h, input_w = image.shape[1], image.shape[2]
+        shortest_edge = min(input_h, input_w)
+        # Calculate scaled resolution (float) then round to nearest even integer for codec compatibility
+        scaled_resolution = shortest_edge * scale_by
+        resolution = int(round(scaled_resolution / 2) * 2)  # Ensure even number
+        # Enforce minimum resolution (16 is the minimum supported by the transforms)
+        resolution = max(resolution, 16)
+
+        if enable_debug:
+            debug.log(f"Scale factor: {scale_by:.2f}x → target shortest edge: {shortest_edge}px → resolution: {resolution}px", category="setup")
         
         # Track execution state in local variables (not instance)
         runner = None

@@ -145,12 +145,18 @@ except (ImportError, AttributeError, OSError):
 FLASH_ATTN_AVAILABLE = FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE
 
 # 3. SageAttention 2 (varlen support)
+# Detect v2+ by checking for v2-only top-level exports.
+# SA2 (v2.2.0) exports: sageattn_qk_int8_pv_fp16_triton, sageattn_qk_int8_pv_fp8_cuda, etc.
+# SA1 (v1.0.6) only exports: sageattn, sageattn_varlen
 sageattn_varlen = None
 SAGE_ATTN_2_AVAILABLE = False
 try:
     from sageattention import sageattn_varlen as _sa2_varlen
-    sageattn_varlen = _sa2_varlen
-    SAGE_ATTN_2_AVAILABLE = True
+    import sageattention as _sa_pkg
+    if hasattr(_sa_pkg, 'sageattn_qk_int8_pv_fp16_triton') or hasattr(_sa_pkg, 'sageattn_qk_int8_pv_fp8_cuda'):
+        # v2+: has INT8 PV (per-value) CUDA/Triton kernels
+        sageattn_varlen = _sa2_varlen
+        SAGE_ATTN_2_AVAILABLE = True
 except (ImportError, AttributeError, OSError):
     pass
 
@@ -169,7 +175,20 @@ except (ImportError, AttributeError, OSError):
     except (ImportError, AttributeError, OSError):
         pass
 
-SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
+# 5. SageAttention 1 (legacy, any CUDA GPU, INT8 per-block)
+# SA1 (v1.0.6) exports sageattn_varlen with the same signature as v2.
+# If SA2 detection failed but sageattn_varlen import succeeded, it's v1.
+sageattn_v1_varlen = None
+SAGE_ATTN_1_AVAILABLE = False
+try:
+    from sageattention import sageattn_varlen as _sa1_varlen
+    if not SAGE_ATTN_2_AVAILABLE:
+        sageattn_v1_varlen = _sa1_varlen
+        SAGE_ATTN_1_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    pass
+
+SAGE_ATTN_AVAILABLE = SAGE_ATTN_1_AVAILABLE or SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
 
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
@@ -177,9 +196,9 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
     Validate attention mode availability with automatic fallback.
     
     Args:
-        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
+        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_1', 'sageattn_2', or 'sageattn_3'
         debug: Optional debug instance for logging
-        
+
     Returns:
         Validated mode that is available
     """
@@ -279,7 +298,27 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
-    
+
+    # SageAttention 1 (legacy, any CUDA GPU)
+    if requested_mode == 'sageattn_1':
+        if SAGE_ATTN_1_AVAILABLE:
+            return requested_mode
+        error_msg = (
+            "Cannot use 'sageattn_1' attention mode: SageAttention v1 is not installed.\n"
+            "\n"
+            "SageAttention 1 provides speedup on any CUDA GPU (Turing+) through INT8 quantization.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install SageAttention v1: pip install sageattention==1.0.6\n"
+            "  2. OR change attention_mode to 'sageattn_2', 'flash_attn_2', or 'sdpa'\n"
+            "\n"
+            "For more info: https://github.com/thu-ml/SageAttention"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+
     return requested_mode
 
 
@@ -493,16 +532,21 @@ def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     uniform_k = (seq_lens_k == seq_lens_k[0]).all()
     
     if not (uniform_q and uniform_k):
-        # Fall back to SA2 for variable-length sequences
+        # Fall back to SA2/SA1 for variable-length sequences
         # This is expected behavior - SA3 Blackwell doesn't support varlen natively
         if SAGE_ATTN_2_AVAILABLE:
             return call_sage_attn_2_varlen(
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
+        if SAGE_ATTN_1_AVAILABLE:
+            return call_sage_attn_1_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
         raise RuntimeError(
             "SageAttention 3 (Blackwell) requires uniform sequence lengths, "
-            "and SageAttention 2 is not available as fallback. "
+            "and neither SageAttention 2 nor 1 is available as fallback. "
             "Please install sageattention package or use flash_attn/sdpa instead."
         )
     
@@ -542,6 +586,69 @@ def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     # Reshape back to varlen format (total_seq, heads, dim)
     out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
     
+    return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
+@torch._dynamo.disable
+def call_sage_attn_1_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for SageAttention 1 sageattn_varlen that handles tensor-to-scalar conversion.
+
+    SageAttention 1 provides optimized attention for any CUDA GPU through INT8
+    per-block quantization with Triton kernels. It uses the same varlen API as SA2.
+
+    Works on Turing, Ampere, Ada, Hopper — any CUDA GPU with Triton support.
+
+    This function is excluded from torch.compile because:
+    1. SageAttention is a Triton-based kernel that can't be compiled
+    2. It requires Python int scalars for max_seqlen parameters
+    3. Disabling compilation here keeps the rest of the model compilable
+
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (causal supported, others ignored)
+
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not SAGE_ATTN_1_AVAILABLE:
+        raise ImportError("SageAttention 1 is not available")
+
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+
+    # SageAttention requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+
+    if q.dtype not in half_dtypes:
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+
+    is_causal = kwargs.get('causal', False)
+    sm_scale = 1.0 / (q.shape[-1] ** 0.5)
+
+    out = sageattn_v1_varlen(
+        q, k, v,
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        is_causal, sm_scale
+    )
+
     return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
